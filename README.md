@@ -2,7 +2,7 @@
 
 A two-ESP32 remote-controlled vehicle built to develop practical embedded
 systems, electronics, wireless communication and hardware-debugging skills.
-The handheld controller reads an analogue joystick and sends structured movement
+The handheld controller reads an analogue joystick and sends movement
 commands over ESP-NOW. The vehicle ESP32 controls two TT motors through a
 TB6612FNG dual motor driver.
 
@@ -19,7 +19,7 @@ improvements rather than requirements for this release.
 - Push-down joystick Stop control
 - Automatic Stop for centred, diagonal or unrecognised joystick positions
 - Direct ESP-NOW communication between two ESP32 boards
-- Structured command packets with PWM speed and sequence number
+- Structured command packets containing command, speed and sequence number
 - Independently calibrated left/right straight-line motor speeds
 - TB6612FNG dual H-bridge motor control
 - Two-second wireless command-loss failsafe
@@ -79,18 +79,19 @@ The full wiring tables and power notes are in
 ### Controller sender
 
 The sender samples the joystick using the ESP32's 12-bit ADC. Calibrated
-thresholds and perpendicular-axis bands convert the analogue readings into one
-of five discrete states. A centred, diagonal or ambiguous position returns Stop.
-The resulting command, speed and sequence number are transmitted every 50 ms.
+thresholds convert the analogue readings into one of five discrete states. A
+centred, diagonal or ambiguous position produces a Stop command. The command is
+converted into the shared vehicle protocol and transmitted every 50 ms with a
+PWM speed value and incrementing sequence number.
 
 ### Vehicle receiver
 
-The receiver validates packet size and command value before acting. Movement
-functions translate high-level commands into TB6612FNG direction and PWM
-signals. Calibrated straight-line PWM values compensate for physical differences
-between the two open-loop motors.
+The receiver checks the packet size before copying incoming data. Its main loop
+uses a switch statement to translate each command into TB6612FNG direction and
+PWM signals. Calibrated straight-line PWM values compensate for physical
+differences between the two open-loop motors.
 
-If the vehicle is moving and receives no valid command for two seconds, it
+If the vehicle is moving and receives no new movement command for two seconds, it
 automatically brakes both motors.
 
 A detailed explanation is available in
@@ -100,12 +101,8 @@ A detailed explanation is available in
 
 ```text
 firmware/
-  controller_sender/     Final handheld-controller firmware
-  vehicle_receiver/      Final vehicle firmware
-utilities/
-  joystick_bench_test/   Joystick calibration and direction test
-  mac_address_reader/    ESP32 station MAC utility
-  packet_monitor_receiver/ ESP-NOW packet-only receiver
+  controller_sender/     Handheld-controller firmware
+  vehicle_receiver/      Vehicle and motor-control firmware
 docs/
   code_walkthrough.md
   pin_connections.md
@@ -131,36 +128,36 @@ Key challenges included:
 
 - Installing the ESP32 USB/serial driver and resolving initial upload failures
 - Calibrating unequal TT motors for straighter open-loop movement
-- Measuring joystick centre variation and designing safe direction thresholds
+- Measuring joystick centre variation and selecting safe direction thresholds
 - Correcting Select-button wiring and active-low input behaviour
 - Keeping both ESP32 radios on the same Wi-Fi channel
 - Adding a command-loss timeout so movement cannot continue indefinitely
-- Separating component tests from the final integrated sender/receiver firmware
+- Integrating the joystick sender with the vehicle's motor-control program
 
 ## Running the project
 
 1. Install ESP32 board support in the Arduino IDE.
 2. Connect the vehicle ESP32 and upload
    `firmware/vehicle_receiver/VehicleReceiver.ino`.
-3. If replacing either ESP32, run the MAC-address utility and update
-   `VEHICLE_MAC` in the controller sketch.
+3. Update `VEHICLE_MAC` in the controller sketch if the vehicle ESP32 changes.
 4. Connect the controller ESP32 and upload
    `firmware/controller_sender/ControllerSender.ino`.
 5. Confirm both devices use ESP-NOW channel 1.
 6. Raise the vehicle wheels for the first test, then power the controller.
 7. Verify Stop and communication-loss behaviour before floor operation.
 
-The callback API signatures match the ESP32 Arduino core used during development.
-Newer or older core releases may expose different ESP-NOW callback signatures.
+The callback API signatures match the ESP32 Arduino core used during
+development. Other core releases may expose different ESP-NOW callback
+signatures.
 
 ## Demonstration
 
-A final demonstration video has been recorded. Add the compressed file to
-`assets/demo/` and link or embed it here before publishing the repository.
+A final demonstration video was recorded. It will be added to `assets/demo/`
+or linked here as project evidence.
 
 ## Skills demonstrated
 
-- Embedded C++ and structured firmware design
+- Embedded C++ program structure and enumerations
 - GPIO, ADC, PWM and active-low digital inputs
 - ESP-NOW peer-to-peer wireless communication
 - Dual H-bridge motor control
