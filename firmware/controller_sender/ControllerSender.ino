@@ -3,34 +3,61 @@
 #include <esp_now.h>
 #include <stdint.h>
 
-// Joystick connections. GPIO34 and GPIO35 are ADC1 inputs, so they remain
-// available while the ESP32 Wi-Fi radio is active.
-constexpr uint8_t X_AXIS_PIN{34};
-constexpr uint8_t Y_AXIS_PIN{35};
-constexpr uint8_t SELECT_PIN{32};
+constexpr uint8_t Xout{ 34 };
+constexpr uint8_t Yout{ 35 };
+constexpr uint8_t Sel{ 32 };
+uint8_t dRead{};
+uint16_t xRead{};
+uint16_t yRead{};
 
-constexpr uint8_t ESPNOW_CHANNEL{1};
-constexpr uint8_t DRIVE_SPEED{130};
-constexpr uint32_t SEND_INTERVAL_MS{50};
+uint8_t DR_OFF{ 1 };
+uint8_t DR_ON{ 0 };
 
-// Calibrated 12-bit ADC thresholds. A wide perpendicular-axis band prevents
-// diagonal stick movement from being interpreted as an unintended command.
-constexpr uint16_t AXIS_BAND_MIN{1700};
-constexpr uint16_t AXIS_BAND_MAX{2300};
-constexpr uint16_t LEFT_THRESHOLD{1000};
-constexpr uint16_t RIGHT_THRESHOLD{3000};
-constexpr uint16_t BACKWARD_THRESHOLD{1000};
-constexpr uint16_t FORWARD_THRESHOLD{3000};
+uint16_t XFORWARD_MIN{ 1700 };
+uint16_t XFORWARD_MAX{ 2300 };
 
-enum class JoystickDirection : uint8_t {
-  Forward,
-  Backward,
-  Left,
-  Right,
-  Stop
+uint16_t XBACKWARD_MIN{ 1700 };
+uint16_t XBACKWARD_MAX{ 2300 };
+
+uint16_t XLEFT_MAX{ 1000 };
+
+uint16_t XRIGHT_MAX{ 3000 };
+
+uint16_t XSTOP_MIN{ 1700 };
+uint16_t XSTOP_MAX{ 2300 };
+
+uint16_t XCENTRE_MIN{ 1900 };
+uint16_t XCENTRE_MAX{ 2100 };
+
+uint16_t YFORWARD_MAX{ 3000 };
+
+uint16_t YBACKWARD_MAX{ 1000 };
+
+uint16_t YLEFT_MIN{ 1700 };
+uint16_t YLEFT_MAX{ 2300 };
+
+uint16_t YRIGHT_MIN{ 1700 };
+uint16_t YRIGHT_MAX{ 2300 };
+
+uint16_t YSTOP_MIN{ 1700 };
+uint16_t YSTOP_MAX{ 2300 };
+
+uint16_t YCENTRE_MIN{ 1920 };
+uint16_t YCENTRE_MAX{ 2120 };
+
+constexpr uint8_t ESPNOW_CHANNEL{ 1 };
+
+enum class joyStick : uint8_t {
+  F,
+  B,
+  L,
+  R,
+  S
 };
 
-// This enum and ControlPacket must remain identical in the receiver sketch.
+joyStick direction{ };
+
+
 enum class VehicleCommand : uint8_t {
   Forward,
   Backward,
@@ -40,79 +67,72 @@ enum class VehicleCommand : uint8_t {
   Invalid
 };
 
-struct ControlPacket {
-  VehicleCommand command{VehicleCommand::Stop};
-  uint8_t speed{0};
-  uint32_t sequence{0};
-};
+joyStick determineDirection() {
+  if (xRead >= XFORWARD_MIN && xRead <= XFORWARD_MAX && yRead >= YFORWARD_MAX && dRead == DR_OFF) {
+    Serial.println("Forward");
+    return joyStick::F;
+  }
 
-static_assert(sizeof(ControlPacket) == 8,
-              "Sender and receiver must use the same packet layout");
+  else if (xRead >= XBACKWARD_MIN && xRead <= XBACKWARD_MAX && yRead <= YBACKWARD_MAX && dRead == DR_OFF) {
+    Serial.println("Backward");
+    return joyStick::B;
+  }
 
-// Station MAC address of the ESP32 installed on the vehicle.
-constexpr uint8_t VEHICLE_MAC[6]{
-  0x8c, 0x94, 0xdf, 0x4d, 0x18, 0xa4
-};
+  else if (xRead <= XLEFT_MAX && yRead >= YLEFT_MIN && yRead <= YLEFT_MAX && dRead == DR_OFF) {
+    Serial.println("Left");
+    return joyStick::L;
+  }
 
-ControlPacket outgoingPacket{};
-esp_now_peer_info_t peerInfo{};
+  else if (xRead >= XRIGHT_MAX && yRead >= YRIGHT_MIN && yRead <= YRIGHT_MAX && dRead == DR_OFF) {
+    Serial.println("Right");
+    return joyStick::R;
+  }
 
-bool valueInBand(uint16_t value) {
-  return value >= AXIS_BAND_MIN && value <= AXIS_BAND_MAX;
+  if (xRead >= XCENTRE_MIN && xRead <= XCENTRE_MAX && yRead >= YCENTRE_MIN && yRead <= YCENTRE_MAX && dRead == DR_OFF) {
+    Serial.println("Centre");
+    return joyStick::S;
+  }
+
+  if (dRead == DR_ON) {
+    Serial.println("Stop");
+    return joyStick::S;
+  }
+
+  else {
+    Serial.println("Stop");
+    return joyStick::S;
+  }
 }
 
-// Reads the physical controller. INPUT_PULLUP makes the Select input LOW when
-// the joystick is pressed and HIGH when it is released.
-void readJoystick(uint16_t& xValue, uint16_t& yValue, bool& selectPressed) {
-  xValue = analogRead(X_AXIS_PIN);
-  yValue = analogRead(Y_AXIS_PIN);
-  selectPressed = digitalRead(SELECT_PIN) == LOW;
-}
+VehicleCommand convertDirection(joyStick controller) {
+  switch (controller) {
 
-// Converts calibrated ADC readings into one safe, discrete controller state.
-// Select has priority, and any unrecognised/diagonal position becomes Stop.
-JoystickDirection determineDirection(uint16_t xValue,
-                                      uint16_t yValue,
-                                      bool selectPressed) {
-  if (selectPressed) {
-    return JoystickDirection::Stop;
-  }
-
-  if (valueInBand(xValue) && yValue >= FORWARD_THRESHOLD) {
-    return JoystickDirection::Forward;
-  }
-
-  if (valueInBand(xValue) && yValue <= BACKWARD_THRESHOLD) {
-    return JoystickDirection::Backward;
-  }
-
-  if (xValue <= LEFT_THRESHOLD && valueInBand(yValue)) {
-    return JoystickDirection::Left;
-  }
-
-  if (xValue >= RIGHT_THRESHOLD && valueInBand(yValue)) {
-    return JoystickDirection::Right;
-  }
-
-  return JoystickDirection::Stop;
-}
-
-VehicleCommand convertDirection(JoystickDirection direction) {
-  switch (direction) {
-    case JoystickDirection::Forward:
+    case joyStick::F:
       return VehicleCommand::Forward;
-    case JoystickDirection::Backward:
+
+    case joyStick::B:
       return VehicleCommand::Backward;
-    case JoystickDirection::Left:
+
+    case joyStick::L:
       return VehicleCommand::Left;
-    case JoystickDirection::Right:
+
+    case joyStick::R:
       return VehicleCommand::Right;
-    case JoystickDirection::Stop:
+
+    case joyStick::S:
       return VehicleCommand::Stop;
   }
-
   return VehicleCommand::Invalid;
 }
+
+struct ControlPacket {
+  VehicleCommand command{ VehicleCommand::Stop };
+  uint8_t speed{ 0 };
+  uint32_t sequence{ 0 };
+};
+
+
+ControlPacket outgoingPacket{};
 
 void prepareControlPacket(VehicleCommand command, uint8_t speed) {
   outgoingPacket.command = command;
@@ -120,19 +140,46 @@ void prepareControlPacket(VehicleCommand command, uint8_t speed) {
   ++outgoingPacket.sequence;
 }
 
-void onDataSent(const wifi_tx_info_t* transmissionInfo,
-                esp_now_send_status_t status) {
-  (void)transmissionInfo;
-  Serial.println(status == ESP_NOW_SEND_SUCCESS
-                   ? "Delivery successful"
-                   : "Delivery failed");
+void joystickRead() {
+  dRead = digitalRead(Sel);
+  Serial.print("Digital Reading: ");
+  Serial.println(dRead);
+  Serial.println();
+
+  xRead = analogRead(Xout);
+  Serial.print("X-axis Analog Reading: ");
+  Serial.println(xRead);
+  Serial.println();
+
+  yRead = analogRead(Yout);
+  Serial.print("Y-axis Analog Reading: ");
+  Serial.println(yRead);
+  Serial.println();
 }
+
+void onDataSent(
+  const wifi_tx_info_t* transmissionInfo,
+  esp_now_send_status_t status) {
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    Serial.println("Delivery Successful");
+    Serial.println();
+  } else {
+    Serial.println("Delivery Failed.");
+    Serial.println();
+  }
+}
+
+constexpr uint8_t VEHICLE_MAC[6]{
+  0x8c, 0x94, 0xdf, 0x4d, 0x18, 0xa4
+};
+
+esp_now_peer_info_t peerInfo{};
 
 void setup() {
   Serial.begin(115200);
-  pinMode(SELECT_PIN, INPUT_PULLUP);
-  analogReadResolution(12);
-
+  pinMode(Xout, INPUT);
+  pinMode(Yout, INPUT);
+  pinMode(Sel, INPUT_PULLUP);
   WiFi.mode(WIFI_STA);
   WiFi.STA.begin();
 
@@ -142,9 +189,10 @@ void setup() {
 
   WiFi.setChannel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("ESP-NOW initialisation failed; restarting");
-    delay(1000);
+  if (esp_now_init() == ESP_OK) {
+    Serial.println("ESP32 Initialised Succesfully!");
+  } else {
+    Serial.println("ESP Initialisation Error.  REBOOTING...");
     ESP.restart();
   }
 
@@ -153,61 +201,56 @@ void setup() {
   peerInfo.encrypt = false;
   peerInfo.ifidx = WIFI_IF_STA;
 
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-    Serial.println("Vehicle peer registration failed; restarting");
-    delay(1000);
-    ESP.restart();
+  if (esp_now_add_peer(&peerInfo) == ESP_OK) {
+    Serial.println("Vehicle Peer Registered!");
+  } else {
+    Serial.println("Failed To Register Peer Vehicle.");
   }
 
-  if (esp_now_register_send_cb(onDataSent) != ESP_OK) {
-    Serial.println("Send callback registration failed; restarting");
-    delay(1000);
-    ESP.restart();
-  }
-
-  Serial.println("RC controller sender ready");
+  esp_now_register_send_cb(onDataSent);
 }
 
 void loop() {
-  uint16_t xValue{};
-  uint16_t yValue{};
-  bool selectPressed{};
+  joystickRead();
 
-  readJoystick(xValue, yValue, selectPressed);
+  direction = determineDirection();
 
-  const JoystickDirection direction{
-    determineDirection(xValue, yValue, selectPressed)
-  };
-  const VehicleCommand command{convertDirection(direction)};
-  const uint8_t speed{
-    command == VehicleCommand::Stop || command == VehicleCommand::Invalid
-      ? 0
-      : DRIVE_SPEED
-  };
+  VehicleCommand command = convertDirection(direction);
+
+  uint8_t speed{};
+
+  if (command == VehicleCommand::Stop ||
+      command == VehicleCommand::Invalid) {
+    speed = 0;
+  }
+  else {
+    speed = 130;
+  }
 
   prepareControlPacket(command, speed);
 
-  Serial.print("X: ");
-  Serial.print(xValue);
-  Serial.print(" | Y: ");
-  Serial.print(yValue);
-  Serial.print(" | command: ");
-  Serial.print(static_cast<uint8_t>(command));
-  Serial.print(" | speed: ");
-  Serial.print(outgoingPacket.speed);
-  Serial.print(" | sequence: ");
+  Serial.print("Sequence: ");
   Serial.println(outgoingPacket.sequence);
 
+  Serial.print("Speed: ");
+  Serial.println(outgoingPacket.speed);
+
   const esp_err_t sendResult{
-    esp_now_send(VEHICLE_MAC,
-                 reinterpret_cast<const uint8_t*>(&outgoingPacket),
-                 sizeof(outgoingPacket))
+    esp_now_send(
+      VEHICLE_MAC,
+      reinterpret_cast<const uint8_t*>(&outgoingPacket),
+      sizeof(outgoingPacket))
   };
 
-  if (sendResult != ESP_OK) {
-    Serial.print("Send request failed: ");
+  if (sendResult == ESP_OK) {
+    Serial.println("Send Queued");
+  }
+  else {
+    Serial.println("Send request failed");
     Serial.println(esp_err_to_name(sendResult));
   }
 
-  delay(SEND_INTERVAL_MS);
+  Serial.println();
+
+  delay(50);
 }
