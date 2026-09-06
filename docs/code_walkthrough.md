@@ -3,112 +3,150 @@
 ## System overview
 
 Two ESP32 boards communicate directly using ESP-NOW. The handheld controller
-reads a two-axis analogue joystick, converts its readings into a discrete
+reads a two-axis analogue joystick, converts its readings into a movement
 command and transmits a `ControlPacket`. The vehicle receives the packet and
 controls two TT motors through a TB6612FNG dual H-bridge.
 
 ## Shared data definitions
 
-`VehicleCommand` lists the only commands the vehicle should execute. The
-underlying type is `uint8_t`, so the command occupies one byte.
+The sender and receiver contain matching versions of `VehicleCommand` and
+`ControlPacket`.
+
+`VehicleCommand` defines Forward, Backward, Left, Right, Stop and Invalid.
 
 `ControlPacket` contains:
 
-- `command`: requested movement;
-- `speed`: PWM value from 0 to 255;
-- `sequence`: a number incremented for each transmission and printed during
-  testing to make packet flow visible.
+- `command`: the requested vehicle movement;
+- `speed`: a PWM value from 0 to 255;
+- `sequence`: an incrementing number used to monitor packet transmission.
 
-The packet definition must remain identical on both ESP32 boards. A
-`static_assert` catches an unexpected layout change during compilation.
+The order and data types in this structure must remain identical in both
+sketches so that the receiver interprets the transmitted bytes correctly.
 
 ## Controller sender
 
-### Pin and threshold constants
+### Pin and calibration constants
 
-GPIO34 and GPIO35 are ADC1 inputs. ADC1 was selected because it remains
-available while Wi-Fi is active. GPIO32 reads the joystick's active-low Select
-switch using the ESP32's internal pull-up resistor.
+GPIO34 and GPIO35 read the joystick's analogue X and Y outputs. GPIO32 reads
+the active-low Select switch using `INPUT_PULLUP`, meaning a pressed switch
+produces `LOW` and a released switch produces `HIGH`.
 
-The joystick was measured near the centre of the 12-bit ADC range. Thresholds
-create a deliberately wide neutral region, preventing natural ADC variation or
-small accidental stick movements from driving the vehicle.
+The ESP32 uses 12-bit analogue readings between 0 and 4095. Threshold constants
+were selected from measured joystick readings. The perpendicular axis must also
+remain within a central band before a cardinal direction is accepted.
 
-### `readJoystick()`
+### `joystickRead()`
 
-Samples both analogue axes and converts the Select pin into a meaningful
-Boolean: `true` means pressed.
+This function reads the Select switch followed by both analogue axes. It prints
+the readings to the Serial Monitor, which was useful during calibration and
+debugging.
 
 ### `determineDirection()`
 
-Gives the push-button Stop command first priority. It then recognises the four
-cardinal directions. If the stick is centred, diagonal or outside the accepted
-bands, the function returns Stop. This fail-safe default prevents an ambiguous
-reading from becoming movement.
+The function compares the readings with the calibrated thresholds:
+
+- high Y with central X produces Forward;
+- low Y with central X produces Backward;
+- low X with central Y produces Left;
+- high X with central Y produces Right.
+
+Movement is accepted only while the Select switch is released. A centred,
+diagonal or unrecognised position falls through to Stop. Pressing the joystick
+also produces Stop.
 
 ### `convertDirection()`
 
-Separates the physical controller vocabulary from the vehicle's communication
-protocol. This makes either side easier to change later.
+This switch statement converts the controller-specific `joyStick` value into
+the shared `VehicleCommand` value sent to the vehicle.
 
 ### `prepareControlPacket()`
 
-Stores the command and speed, then increments the diagnostic sequence number.
+This function stores the selected command and speed in `outgoingPacket`, then
+increments the sequence number. Stop and Invalid commands use speed 0;
+movement commands use speed 130.
 
-### ESP-NOW setup and send callback
+### ESP-NOW setup
 
-The controller starts Wi-Fi in station mode, selects channel 1, initialises
-ESP-NOW and registers the vehicle's station MAC address as a peer. The callback
-reports whether the radio delivered each queued packet successfully.
+The controller starts Wi-Fi in station mode and sets channel 1. It initialises
+ESP-NOW, copies the vehicle ESP32's station MAC address into `peerInfo`, and
+registers the vehicle as an unencrypted peer. The MAC address identifies the
+specific receiver on the local ESP-NOW link; it is not a password.
+
+The `onDataSent()` callback reports whether ESP-NOW delivery succeeded or
+failed.
 
 ### Main loop
 
-The main loop reads the joystick, determines a direction, converts it into a
-vehicle command, assigns speed zero to Stop/Invalid and transmits a packet every
-50 ms.
+Every 50 ms, the sender:
+
+1. reads the joystick;
+2. determines a direction;
+3. converts it into a vehicle command;
+4. selects speed 0 or 130;
+5. prepares the packet;
+6. transmits it to the vehicle MAC address.
 
 ## Vehicle receiver
 
-### Safe startup
+### Motor-driver pins and calibration
 
-The motor GPIO pins are configured before the radio. `enterStandby()` disables
-the TB6612FNG and sets both PWM outputs to zero, so a wireless setup failure
-cannot accidentally leave the motors energised.
+The receiver defines seven GPIO connections for the TB6612FNG driver. Motor A
+and Motor B each have two direction inputs and one PWM input, while `STBY`
+enables the driver.
 
-### Motor primitives
+Forward and backward use independently calibrated speeds:
 
-The clockwise and counter-clockwise functions set each H-bridge input pair and
-then apply PWM. PWM is first set to zero while direction changes, reducing harsh
-electrical/mechanical transitions.
+| Movement | Left motor PWM | Right motor PWM |
+| --- | ---: | ---: |
+| Forward | 228 | 130 |
+| Backward | 219 | 130 |
 
-### Vehicle movements
+These unequal values compensate for differences between the two motors in this
+open-loop system.
 
-Forward and backward use independently calibrated left/right PWM values to
-compensate for unequal open-loop motors. Turning drives the two motors in
-opposite directions using the speed received from the controller.
+### Motor functions
 
-### Receive callback
+`motorAClockwise()`, `motorACounterClockwise()`, `motorBClockwise()` and
+`motorBCounterClockwise()` set the relevant direction pins and PWM values.
+The PWM output is first set to zero before changing direction.
 
-ESP-NOW calls `onDataReceived()` when a packet arrives. It rejects packets of
-the wrong size. A FreeRTOS critical section protects the shared packet so the
-main loop cannot read it halfway through an update.
+`brakeMotorA()` and `brakeMotorB()` set the motor-driver inputs to the braking
+state. `RCStop()` applies braking to both motors.
 
-### `applyPacket()`
+### Vehicle movement functions
 
-Rejects unsupported enum values and defaults to stopping. Valid commands update
-the last-command time and call the matching movement function.
+- `RCForward()` drives both motors clockwise using the calibrated forward PWM
+  values.
+- `RCBackward()` reverses both motors using the calibrated backward PWM values.
+- `RCLeft()` and `RCRight()` drive the motors in opposite directions so the
+  vehicle turns on the spot.
+
+### `onDataReceived()`
+
+ESP-NOW calls this function when data arrives. It rejects data if its length
+does not match `ControlPacket`. A correctly sized packet is copied into
+`incomingPacket`, and `newPacketAvailable` tells the main loop that a command is
+ready.
+
+### Receiver setup
+
+The receiver starts Wi-Fi in station mode, selects ESP-NOW channel 1,
+initialises ESP-NOW and registers the receive callback. It then configures the
+TB6612FNG control pins as outputs and calls `enterStandby()` before normal
+operation begins.
+
+### Receiver main loop
+
+When a packet is available, the loop clears the flag and uses a switch statement
+to execute the command. Movement commands update `lastValidCommandTime_MS` and
+set `vehicleMoving` to `true`. Stop brakes the motors and clears the movement
+flag. Invalid commands also stop the vehicle.
 
 ### Communication-loss failsafe
 
-While the vehicle is moving, the main loop checks how long it has been since a
-valid packet arrived. If the interval reaches 2000 ms, it brakes both motors and
-clears the moving state. This prevents the last movement command from continuing
-indefinitely when the controller loses power or radio contact.
+While the vehicle is moving, the program compares `millis()` with the time of
+the last valid command. If the elapsed time reaches 2000 ms, `RCStop()` brakes
+both motors and the message `Wireless command timeout` is printed.
 
-## Utilities
-
-- `JoystickBenchTest.ino` measures and verifies joystick behaviour without the
-  wireless system.
-- `MacAddressReader.ino` obtains an ESP32 station MAC address for peer setup.
-- `PacketMonitorReceiver.ino` verifies packet delivery without operating any
-  motors.
+This prevents the last movement instruction from continuing indefinitely if
+the controller loses power or wireless communication is interrupted.
