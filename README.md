@@ -152,8 +152,7 @@ signatures.
 
 ## Demonstration
 
-A final demonstration video was recorded. It will be added to `assets/demo/`
-or linked here as project evidence.
+[Watch the RC vehicle demonstration video](assets/demo/rc-vehicle-demo.mp4)
 
 ## Project photos
 
