@@ -155,6 +155,20 @@ signatures.
 A final demonstration video was recorded. It will be added to `assets/demo/`
 or linked here as project evidence.
 
+## Project photos
+
+### Vehicle
+
+![Completed ESP32 RC vehicle](assets/images/vehicle-overview.jpeg)
+
+### Handheld controller
+
+![ESP32 joystick controller](assets/images/controller.jpeg)
+
+### Vehicle electronics
+
+![ESP32 vehicle electronics and wiring](assets/images/vehicle-electronics.jpeg)
+
 ## Skills demonstrated
 
 - Embedded C++ program structure and enumerations
